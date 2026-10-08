@@ -1,0 +1,17 @@
+# Ushbu server (islam-hifz) uchun override: tashqi TLS/reverse-proxy'ni
+# host darajasidagi FrankenPHP boshqaradi, shuning uchun bu faylda
+# loyihaning o'z `caddy` xizmati ISHLATILMAYDI va `web` porti
+# (APP_BIND_ADDRESS:APP_PORT, compose.yaml'dagi default) 127.0.0.1'da
+# ochiq qoladi — FrankenPHP shu portga reverse_proxy qiladi.
+#
+# compose.staging.yaml o'rniga ishlatiladi (u o'zining caddy xizmatini
+# 80/443 portlarda ochadi va bu portlar serverda FrankenPHP tomonidan
+# allaqachon band — SERVER_DEPLOYMENT_NOTES.md ga qarang).
+services:
+  app:
+    environment:
+      SESSION_SECURE_COOKIE: "true"
+
+  worker:
+    environment:
+      SESSION_SECURE_COOKIE: "true"
