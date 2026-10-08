@@ -1,0 +1,8 @@
+node_modules/
+capacitor.config.json
+www/offline.html
+android/.gradle/
+android/local.properties
+android/build/
+android/app/build/
+android/captures/

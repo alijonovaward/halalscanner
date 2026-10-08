@@ -1,0 +1,20 @@
+{
+    "name": "halalscan-mobile",
+    "private": true,
+    "version": "0.1.0",
+    "type": "module",
+    "scripts": {
+        "configure": "node scripts/configure.mjs",
+        "test": "node --test tests/*.test.mjs",
+        "android:sync": "npm run configure && npx cap sync android",
+        "android:debug": "npm run android:sync && cd android && ./gradlew assembleDebug"
+    },
+    "dependencies": {
+        "@capacitor/barcode-scanner": "3.1.2",
+        "@capacitor/core": "8.5.2"
+    },
+    "devDependencies": {
+        "@capacitor/android": "8.5.2",
+        "@capacitor/cli": "8.5.2"
+    }
+}

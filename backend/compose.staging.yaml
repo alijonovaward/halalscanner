@@ -1,0 +1,40 @@
+x-staging-environment: &staging-environment
+  APP_ENV: staging
+  APP_DEBUG: "false"
+  APP_URL: https://${APP_DOMAIN:?Set APP_DOMAIN in the staging environment file}
+  SESSION_SECURE_COOKIE: "true"
+
+services:
+  web:
+    ports: !reset []
+
+  migrate:
+    environment: *staging-environment
+
+  app:
+    environment: *staging-environment
+
+  worker:
+    environment: *staging-environment
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      web:
+        condition: service_healthy
+    environment:
+      APP_DOMAIN: ${APP_DOMAIN:?Set APP_DOMAIN in the staging environment file}
+      ACME_EMAIL: ${ACME_EMAIL:?Set ACME_EMAIL in the staging environment file}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./docker/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">HalalScan</string>
+    <string name="title_activity_main">HalalScan</string>
+    <string name="package_name">uz.halalscan.app</string>
+    <string name="custom_url_scheme">uz.halalscan.app</string>
+</resources>

@@ -1,0 +1,130 @@
+name: halalscan
+
+x-app-build: &app-build
+  context: .
+  dockerfile: Dockerfile
+  target: runtime
+
+x-app-environment: &app-environment
+  APP_NAME: ${APP_NAME:-HalalScan}
+  APP_ENV: ${APP_ENV:-local}
+  APP_KEY: ${APP_KEY:?Set APP_KEY in the Compose environment file}
+  APP_DEBUG: ${APP_DEBUG:-false}
+  APP_URL: ${APP_URL:-http://localhost:8000}
+  LOG_CHANNEL: ${LOG_CHANNEL:-stderr}
+  LOG_LEVEL: ${LOG_LEVEL:-info}
+  DB_CONNECTION: pgsql
+  DB_HOST: db
+  DB_PORT: 5432
+  DB_DATABASE: ${DB_DATABASE:-halalscan}
+  DB_USERNAME: ${DB_USERNAME:-halalscan}
+  DB_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the Compose environment file}
+  SESSION_DRIVER: database
+  CACHE_STORE: database
+  QUEUE_CONNECTION: database
+  FILESYSTEM_DISK: local
+  GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+  GEMINI_MODEL: ${GEMINI_MODEL:-gemini-flash-latest}
+  GEMINI_TIMEOUT: ${GEMINI_TIMEOUT:-20}
+  GEMINI_CACHE_TTL: ${GEMINI_CACHE_TTL:-86400}
+
+services:
+  db:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${DB_DATABASE:-halalscan}
+      POSTGRES_USER: ${DB_USERNAME:-halalscan}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?Set DB_PASSWORD in the Compose environment file}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  migrate:
+    build: *app-build
+    environment: *app-environment
+    depends_on:
+      db:
+        condition: service_healthy
+    command: ["php", "artisan", "migrate", "--force", "--no-interaction"]
+    restart: "no"
+    volumes:
+      - storage_data:/var/www/html/storage
+
+  app:
+    build: *app-build
+    restart: unless-stopped
+    environment: *app-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - storage_data:/var/www/html/storage
+    healthcheck:
+      test: ["CMD", "php-fpm", "-t"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  worker:
+    build: *app-build
+    restart: unless-stopped
+    environment: *app-environment
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    command:
+      - php
+      - artisan
+      - queue:work
+      - --sleep=3
+      - --tries=3
+      - --timeout=60
+      - --max-time=3600
+    volumes:
+      - storage_data:/var/www/html/storage
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: web
+    restart: unless-stopped
+    depends_on:
+      app:
+        condition: service_started
+    ports:
+      - "${APP_BIND_ADDRESS:-127.0.0.1}:${APP_PORT:-8000}:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8080/up || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+  php-tests:
+    profiles: ["test"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: php-test
+    environment:
+      APP_ENV: testing
+      APP_KEY: base64:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+    command: ["php", "artisan", "test", "--compact"]
+
+  js-tests:
+    profiles: ["test"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: js-test
+
+volumes:
+  postgres_data:
+  storage_data:
