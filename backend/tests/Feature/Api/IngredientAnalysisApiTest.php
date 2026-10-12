@@ -266,6 +266,638 @@ class IngredientAnalysisApiTest extends TestCase
             ->assertJsonPath('data.screening.reason_codes.0', 'visual_identification_unverified');
     }
 
+    public function test_inherently_halal_animal_products_are_not_flagged_only_for_their_origin(): void
+    {
+        $response = $this->geminiResponse();
+        $analysis = json_decode(
+            $response['candidates'][0]['content']['parts'][0]['text'],
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+        $ingredients = [
+            'молоко цельное',
+            'сырое молоко',
+            'сливки',
+            'яйцо куриное',
+            'mallard eggs',
+            'мёд',
+            'пчелиный воск',
+            'рыбий желатин',
+            'рыбного коллагена',
+            'fish oil',
+            'ланолин',
+        ];
+        $analysis['normalized_ingredients'] = array_map(
+            static fn (string $ingredient): array => [
+                'name' => $ingredient,
+                'source_text' => $ingredient,
+            ],
+            $ingredients,
+        );
+        $analysis['attention_items'] = array_map(
+            static fn (string $ingredient): array => [
+                'ingredient' => $ingredient,
+                'category' => 'animal_origin',
+                'evidence_basis' => 'ingredients_text',
+                'reason' => 'Ингредиент животного происхождения.',
+            ],
+            $ingredients,
+        );
+        $analysis['summary'] = 'Все ингредиенты требуют проверки из-за животного происхождения.';
+        $response['candidates'][0]['content']['parts'][0]['text'] = json_encode(
+            $analysis,
+            JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE,
+        );
+
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($response, 200),
+        ]);
+
+        $this->postJson('/api/ingredient-analyses', [
+            'ingredients_text' => implode(', ', $ingredients),
+            'source_quality' => 'complete',
+        ])
+            ->assertOk()
+            ->assertJsonPath('data.analysis.attention_items', [])
+            ->assertJsonPath(
+                'data.analysis.summary',
+                'В указанном полном составе явных харам-признаков не обнаружено.',
+            )
+            ->assertJsonPath('data.screening.status', 'no_obvious_concerns')
+            ->assertJsonPath('data.screening.reason_codes', []);
+    }
+
+    public function test_a_safe_animal_source_must_be_grounded_in_the_supplied_text(): void
+    {
+        $response = $this->geminiResponse();
+        $analysis = json_decode(
+            $response['candidates'][0]['content']['parts'][0]['text'],
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+        $analysis['normalized_ingredients'] = [
+            ['name' => 'желатин', 'source_text' => 'желатин'],
+        ];
+        $analysis['attention_items'] = [[
+            'ingredient' => 'рыбий желатин',
+            'category' => 'animal_origin',
+            'evidence_basis' => 'ingredients_text',
+            'reason' => 'Источник заявлен как рыбный.',
+        ]];
+        $analysis['summary'] = 'Рыбий желатин допустим.';
+        $response['candidates'][0]['content']['parts'][0]['text'] = json_encode(
+            $analysis,
+            JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE,
+        );
+
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($response, 200),
+        ]);
+
+        $this->postJson('/api/ingredient-analyses', [
+            'ingredients_text' => 'желатин',
+            'source_quality' => 'complete',
+        ])
+            ->assertOk()
+            ->assertJsonCount(1, 'data.analysis.attention_items')
+            ->assertJsonPath('data.screening.status', 'needs_review')
+            ->assertJsonPath('data.screening.reason_codes.0', 'ingredient_origin_unverified');
+    }
+
+    public function test_a_safe_token_does_not_hide_a_slaughter_dependent_ingredient(): void
+    {
+        $response = $this->geminiResponse();
+        $analysis = json_decode(
+            $response['candidates'][0]['content']['parts'][0]['text'],
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+        $ingredients = [
+            'молоко цельное',
+            'egg yolk with bovine gelatin',
+            'рыбный бульон с говяжьим жиром',
+            'honey with bovine collagen',
+            'fish-free bovine gelatin',
+        ];
+        $analysis['normalized_ingredients'] = array_map(
+            static fn (string $ingredient): array => [
+                'name' => $ingredient,
+                'source_text' => $ingredient,
+            ],
+            $ingredients,
+        );
+        $analysis['attention_items'] = array_map(
+            static fn (string $ingredient): array => [
+                'ingredient' => $ingredient,
+                'category' => 'animal_origin',
+                'evidence_basis' => 'ingredients_text',
+                'reason' => 'Источник ингредиента требует проверки.',
+            ],
+            $ingredients,
+        );
+        $analysis['summary'] = 'Все ингредиенты требуют проверки из-за животного происхождения.';
+        $response['candidates'][0]['content']['parts'][0]['text'] = json_encode(
+            $analysis,
+            JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE,
+        );
+
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($response, 200),
+        ]);
+
+        $this->postJson('/api/ingredient-analyses', [
+            'ingredients_text' => implode(', ', $ingredients),
+            'source_quality' => 'complete',
+        ])
+            ->assertOk()
+            ->assertJsonCount(4, 'data.analysis.attention_items')
+            ->assertJsonMissing(['ingredient' => 'молоко цельное'])
+            ->assertJsonPath(
+                'data.analysis.summary',
+                'Обнаружены ингредиенты, требующие проверки; допустимые продукты животного происхождения не считаются риском сами по себе.',
+            )
+            ->assertJsonPath('data.screening.status', 'needs_review');
+    }
+
+    public function test_processed_dairy_and_slaughter_dependent_derivatives_still_require_review(): void
+    {
+        $response = $this->geminiResponse();
+        $analysis = json_decode(
+            $response['candidates'][0]['content']['parts'][0]['text'],
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+        $analysis['normalized_ingredients'] = [
+            ['name' => 'молочная сыворотка', 'source_text' => 'молочная сыворотка'],
+            ['name' => 'сычужный фермент', 'source_text' => 'сычужный фермент'],
+            ['name' => 'говяжий желатин', 'source_text' => 'говяжий желатин'],
+            ['name' => 'сгущённое молоко', 'source_text' => 'сгущённое молоко'],
+            ['name' => 'ice cream', 'source_text' => 'ice cream'],
+            ['name' => 'cat milk', 'source_text' => 'cat milk'],
+        ];
+        $analysis['attention_items'] = [
+            [
+                'ingredient' => 'молочная сыворотка',
+                'category' => 'processing_aid',
+                'evidence_basis' => 'ingredients_text',
+                'reason' => 'Неизвестен фермент, использованный при производстве.',
+            ],
+            [
+                'ingredient' => 'сычужный фермент',
+                'category' => 'processing_aid',
+                'evidence_basis' => 'ingredients_text',
+                'reason' => 'Источник фермента не указан.',
+            ],
+            [
+                'ingredient' => 'говяжий желатин',
+                'category' => 'animal_origin',
+                'evidence_basis' => 'ingredients_text',
+                'reason' => 'Халяльный забой животного не подтверждён.',
+            ],
+            [
+                'ingredient' => 'сгущённое молоко',
+                'category' => 'animal_origin',
+                'evidence_basis' => 'ingredients_text',
+                'reason' => 'Сложный молочный продукт требует проверки добавок и процесса.',
+            ],
+            [
+                'ingredient' => 'ice cream',
+                'category' => 'animal_origin',
+                'evidence_basis' => 'ingredients_text',
+                'reason' => 'Сложный молочный продукт требует проверки добавок и процесса.',
+            ],
+            [
+                'ingredient' => 'cat milk',
+                'category' => 'animal_origin',
+                'evidence_basis' => 'ingredients_text',
+                'reason' => 'Источник молока не относится к разрешённым пищевым животным.',
+            ],
+        ];
+        $response['candidates'][0]['content']['parts'][0]['text'] = json_encode(
+            $analysis,
+            JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE,
+        );
+
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($response, 200),
+        ]);
+
+        $this->postJson('/api/ingredient-analyses', [
+            'ingredients_text' => 'молочная сыворотка, сычужный фермент, говяжий желатин, сгущённое молоко, ice cream, cat milk',
+            'source_quality' => 'complete',
+        ])
+            ->assertOk()
+            ->assertJsonCount(6, 'data.analysis.attention_items')
+            ->assertJsonPath('data.screening.status', 'needs_review')
+            ->assertJsonPath('data.screening.reason_codes.0', 'ingredient_origin_unverified');
+    }
+
+    public function test_hanafi_madhhab_differences_require_review_instead_of_a_haram_claim(): void
+    {
+        $response = $this->geminiResponse();
+        $analysis = json_decode(
+            $response['candidates'][0]['content']['parts'][0]['text'],
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+        $analysis['normalized_ingredients'] = [
+            ['name' => 'креветка', 'source_text' => 'креветка'],
+        ];
+        $analysis['attention_items'] = [[
+            'ingredient' => 'креветка',
+            'category' => 'madhhab_difference',
+            'evidence_basis' => 'ingredients_text',
+            'reason' => 'Статус не-рыбных морепродуктов различается по мазхабам.',
+        ]];
+        $response['candidates'][0]['content']['parts'][0]['text'] = json_encode(
+            $analysis,
+            JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE,
+        );
+
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($response, 200),
+        ]);
+
+        $this->postJson('/api/ingredient-analyses', [
+            'ingredients_text' => 'креветка',
+            'source_quality' => 'complete',
+        ])
+            ->assertOk()
+            ->assertJsonPath('data.screening.status', 'needs_review')
+            ->assertJsonPath('data.screening.reason_codes', ['madhhab_difference']);
+    }
+
+    public function test_explicit_blood_carrion_and_forbidden_animals_are_haram(): void
+    {
+        $response = $this->geminiResponse();
+        $analysis = json_decode(
+            $response['candidates'][0]['content']['parts'][0]['text'],
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+        $analysis['normalized_ingredients'] = [];
+        $analysis['attention_items'] = [
+            [
+                'ingredient' => 'пищевая кровь',
+                'category' => 'blood',
+                'evidence_basis' => 'ingredients_text',
+                'reason' => 'В составе прямо указана кровь.',
+            ],
+            [
+                'ingredient' => 'мясо павшего животного',
+                'category' => 'carrion',
+                'evidence_basis' => 'label_text',
+                'reason' => 'На этикетке прямо указана падаль.',
+            ],
+            [
+                'ingredient' => 'собачий жир',
+                'category' => 'forbidden_animal',
+                'evidence_basis' => 'ingredients_text',
+                'reason' => 'Продукт получен от запрещённого животного.',
+            ],
+        ];
+        $response['candidates'][0]['content']['parts'][0]['text'] = json_encode(
+            $analysis,
+            JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE,
+        );
+
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($response, 200),
+        ]);
+
+        $this->postJson('/api/ingredient-analyses', [
+            'label_text' => 'Состав: пищевая кровь, мясо павшего животного, собачий жир.',
+            'ingredients_text' => 'пищевая кровь, мясо павшего животного, собачий жир',
+            'source_quality' => 'complete',
+        ])
+            ->assertOk()
+            ->assertJsonPath('data.screening.status', 'haram')
+            ->assertJsonPath('data.screening.reason_codes.0', 'contains_blood')
+            ->assertJsonPath('data.screening.reason_codes.1', 'contains_carrion')
+            ->assertJsonPath('data.screening.reason_codes.2', 'contains_forbidden_animal');
+    }
+
+    public function test_a_named_halal_certificate_claim_outweighs_incomplete_text_and_ambiguous_ingredients(): void
+    {
+        $response = $this->geminiResponse();
+        $analysis = json_decode(
+            $response['candidates'][0]['content']['parts'][0]['text'],
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+        $analysis['input_quality'] = 'partial';
+        $analysis['normalized_ingredients'] = [];
+        $analysis['attention_items'] = [[
+            'ingredient' => 'эмульгатор',
+            'category' => 'ambiguous_additive',
+            'evidence_basis' => 'ingredients_text',
+            'reason' => 'Источник не указан.',
+        ]];
+        $analysis['halal_certification'] = [
+            'detected' => true,
+            'certification_body' => 'Совет муфтиев России',
+            'source_text' => 'сертифицировано в СДС «Халяль»',
+            'evidence_basis' => 'label_text',
+        ];
+        $analysis['summary'] = 'На упаковке заявлен сертификат халяль.';
+        $response['candidates'][0]['content']['parts'][0]['text'] = json_encode(
+            $analysis,
+            JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE,
+        );
+
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($response, 200),
+        ]);
+
+        $this->postJson('/api/ingredient-analyses', [
+            'label_text' => 'NESCAFE 3 в 1. Совет муфтиев России. Сертифицировано в СДС «Халяль».',
+            'product_name' => 'NESCAFE 3 в 1 Strong',
+            'product_type' => 'растворимый кофейный напиток',
+            'product_type_basis' => 'label',
+            'source_quality' => 'partial',
+        ])
+            ->assertOk()
+            ->assertJsonPath('data.analysis.halal_certification.detected', true)
+            ->assertJsonPath(
+                'data.analysis.halal_certification.certification_body',
+                'Совет муфтиев России',
+            )
+            ->assertJsonPath(
+                'data.analysis.summary',
+                'На упаковке заявлен сертификат халяль. Орган сертификации: Совет муфтиев России. Маркировка распознана по этикетке, но ещё не проверена по реестру. Состав распознан не полностью; для окончательной проверки нужна полная этикетка.',
+            )
+            ->assertJsonPath('data.screening.status', 'halal_certificate_claim')
+            ->assertJsonPath('data.screening.reason_codes.0', 'certification_claim_detected')
+            ->assertJsonPath('data.screening.reason_codes.1', 'incomplete_source_text')
+            ->assertJsonPath('data.screening.advisory_only', true);
+    }
+
+    public function test_a_halal_certificate_conflicting_with_explicit_pork_is_undetermined(): void
+    {
+        $response = $this->geminiResponse();
+        $analysis = json_decode(
+            $response['candidates'][0]['content']['parts'][0]['text'],
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+        $analysis['normalized_ingredients'] = [
+            ['name' => 'шпик', 'source_text' => 'шпик свиной'],
+        ];
+        $analysis['attention_items'] = [[
+            'ingredient' => 'шпик свиной',
+            'category' => 'pork',
+            'evidence_basis' => 'ingredients_text',
+            'reason' => 'Явно указан продукт свиного происхождения.',
+        ]];
+        $analysis['halal_certification'] = [
+            'detected' => true,
+            'certification_body' => 'Совет муфтиев России',
+            'source_text' => 'Продукция сертифицирована «Халяль»',
+            'evidence_basis' => 'label_text',
+        ];
+        $analysis['summary'] = 'Маркировка халяль противоречит заявленному составу.';
+        $response['candidates'][0]['content']['parts'][0]['text'] = json_encode(
+            $analysis,
+            JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE,
+        );
+
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($response, 200),
+        ]);
+
+        $this->postJson('/api/ingredient-analyses', [
+            'label_text' => 'Совет муфтиев России. Продукция сертифицирована «Халяль». Состав: шпик свиной.',
+            'ingredients_text' => 'шпик свиной',
+            'source_quality' => 'complete',
+        ])
+            ->assertOk()
+            ->assertJsonPath('data.screening.status', 'certificate_conflict')
+            ->assertJsonPath('data.screening.reason_codes.0', 'certification_claim_detected')
+            ->assertJsonPath('data.screening.reason_codes.1', 'contains_pork')
+            ->assertJsonPath(
+                'data.analysis.summary',
+                'На упаковке заявлен сертификат халяль. Орган сертификации: Совет муфтиев России. Однако на этикетке или в составе обнаружен явный харам-признак: шпик свиной. Данные противоречат друг другу — результат неопределён и требует ручной проверки.',
+            )
+            ->assertJsonPath('data.analysis.attention_items.0.category', 'pork');
+    }
+
+    public function test_an_ungrounded_certificate_claim_cannot_soften_explicit_pork(): void
+    {
+        $response = $this->geminiResponse();
+        $analysis = json_decode(
+            $response['candidates'][0]['content']['parts'][0]['text'],
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+        $analysis['normalized_ingredients'] = [
+            ['name' => 'шпик', 'source_text' => 'шпик свиной'],
+        ];
+        $analysis['attention_items'] = [[
+            'ingredient' => 'шпик свиной',
+            'category' => 'pork',
+            'evidence_basis' => 'ingredients_text',
+            'reason' => 'Явно указан продукт свиного происхождения.',
+        ]];
+        $analysis['halal_certification'] = [
+            'detected' => true,
+            'certification_body' => 'Выдуманный центр халяль',
+            'source_text' => 'Продукция сертифицирована «Халяль»',
+            'evidence_basis' => 'label_text',
+        ];
+        $response['candidates'][0]['content']['parts'][0]['text'] = json_encode(
+            $analysis,
+            JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE,
+        );
+
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($response, 200),
+        ]);
+
+        $this->postJson('/api/ingredient-analyses', [
+            'label_text' => 'HALAL. Состав: шпик свиной.',
+            'ingredients_text' => 'шпик свиной',
+            'source_quality' => 'complete',
+        ])
+            ->assertOk()
+            ->assertJsonPath('data.analysis.halal_certification.certification_body', '')
+            ->assertJsonPath('data.analysis.halal_certification.source_text', '')
+            ->assertJsonPath('data.analysis.halal_certification.evidence_basis', 'visual')
+            ->assertJsonPath('data.screening.status', 'haram')
+            ->assertJsonPath('data.screening.reason_codes.0', 'contains_pork');
+    }
+
+    public function test_a_generic_halal_mark_cannot_soften_explicit_pork(): void
+    {
+        $response = $this->geminiResponse();
+        $analysis = json_decode(
+            $response['candidates'][0]['content']['parts'][0]['text'],
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+        $analysis['normalized_ingredients'] = [
+            ['name' => 'шпик', 'source_text' => 'шпик свиной'],
+        ];
+        $analysis['attention_items'] = [[
+            'ingredient' => 'шпик свиной',
+            'category' => 'pork',
+            'evidence_basis' => 'ingredients_text',
+            'reason' => 'Явно указан продукт свиного происхождения.',
+        ]];
+        $analysis['halal_certification'] = [
+            'detected' => true,
+            'certification_body' => 'HALAL',
+            'source_text' => 'HALAL',
+            'evidence_basis' => 'label_text',
+        ];
+        $response['candidates'][0]['content']['parts'][0]['text'] = json_encode(
+            $analysis,
+            JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE,
+        );
+
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($response, 200),
+        ]);
+
+        $this->postJson('/api/ingredient-analyses', [
+            'label_text' => 'HALAL. Состав: шпик свиной.',
+            'ingredients_text' => 'шпик свиной',
+            'source_quality' => 'complete',
+        ])
+            ->assertOk()
+            ->assertJsonPath('data.analysis.halal_certification.certification_body', '')
+            ->assertJsonPath('data.analysis.halal_certification.evidence_basis', 'visual')
+            ->assertJsonPath('data.screening.status', 'haram')
+            ->assertJsonPath('data.screening.reason_codes.0', 'contains_pork');
+    }
+
+    public function test_a_halal_certificate_conflicting_with_an_intoxicating_product_is_undetermined(): void
+    {
+        $response = $this->geminiResponse();
+        $analysis = json_decode(
+            $response['candidates'][0]['content']['parts'][0]['text'],
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+        $analysis['normalized_ingredients'] = [];
+        $analysis['attention_items'] = [[
+            'ingredient' => 'ВОДКА',
+            'category' => 'intoxicating_beverage',
+            'evidence_basis' => 'label_text',
+            'reason' => 'Товар прямо обозначен как водка.',
+        ]];
+        $analysis['halal_certification'] = [
+            'detected' => true,
+            'certification_body' => 'Halal Authority',
+            'source_text' => 'HALAL CERTIFIED',
+            'evidence_basis' => 'label_text',
+        ];
+        $response['candidates'][0]['content']['parts'][0]['text'] = json_encode(
+            $analysis,
+            JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE,
+        );
+
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($response, 200),
+        ]);
+
+        $this->postJson('/api/ingredient-analyses', [
+            'label_text' => 'ВОДКА. HALAL CERTIFIED. Halal Authority.',
+            'product_type' => 'водка',
+            'product_type_basis' => 'label',
+            'source_quality' => 'partial',
+        ])
+            ->assertOk()
+            ->assertJsonPath('data.screening.status', 'certificate_conflict')
+            ->assertJsonPath('data.screening.reason_codes.1', 'contains_intoxicating_beverage')
+            ->assertJsonPath('data.screening.reason_codes.2', 'incomplete_source_text')
+            ->assertJsonPath(
+                'data.analysis.summary',
+                'На упаковке заявлен сертификат халяль. Орган сертификации: Halal Authority. Однако на этикетке или в составе обнаружен явный харам-признак: ВОДКА. Данные противоречат друг другу — результат неопределён и требует ручной проверки. Состав распознан не полностью; для окончательной проверки нужна полная этикетка.',
+            );
+    }
+
+    public function test_an_unattributed_halal_mark_still_requires_review(): void
+    {
+        $response = $this->geminiResponse();
+        $analysis = json_decode(
+            $response['candidates'][0]['content']['parts'][0]['text'],
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+        $analysis['normalized_ingredients'] = [];
+        $analysis['attention_items'] = [];
+        $analysis['halal_certification'] = [
+            'detected' => true,
+            'certification_body' => 'HALAL',
+            'source_text' => 'HALAL',
+            'evidence_basis' => 'label_text',
+        ];
+        $analysis['summary'] = 'На упаковке виден знак HALAL без читаемого органа сертификации.';
+        $response['candidates'][0]['content']['parts'][0]['text'] = json_encode(
+            $analysis,
+            JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE,
+        );
+
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($response, 200),
+        ]);
+
+        $this->postJson('/api/ingredient-analyses', [
+            'label_text' => 'HALAL',
+            'source_quality' => 'partial',
+        ])
+            ->assertOk()
+            ->assertJsonPath('data.analysis.halal_certification.certification_body', '')
+            ->assertJsonPath('data.analysis.halal_certification.evidence_basis', 'visual')
+            ->assertJsonPath(
+                'data.analysis.summary',
+                'На упаковке виден знак HALAL без читаемого органа сертификации. Состав распознан не полностью; для окончательной проверки нужна полная этикетка.',
+            )
+            ->assertJsonPath('data.screening.status', 'needs_review')
+            ->assertJsonPath('data.screening.reason_codes.0', 'certificate_issuer_unverified')
+            ->assertJsonPath('data.screening.reason_codes.1', 'incomplete_source_text');
+    }
+
+    public function test_a_weak_certificate_claim_keeps_other_review_reasons(): void
+    {
+        $response = $this->geminiResponse();
+        $analysis = json_decode(
+            $response['candidates'][0]['content']['parts'][0]['text'],
+            true,
+            flags: JSON_THROW_ON_ERROR,
+        );
+        $analysis['attention_items'] = [[
+            'ingredient' => 'эмульгатор',
+            'category' => 'ambiguous_additive',
+            'evidence_basis' => 'ingredients_text',
+            'reason' => 'Источник не указан.',
+        ]];
+        $analysis['halal_certification'] = [
+            'detected' => true,
+            'certification_body' => '',
+            'source_text' => 'HALAL',
+            'evidence_basis' => 'visual',
+        ];
+        $response['candidates'][0]['content']['parts'][0]['text'] = json_encode(
+            $analysis,
+            JSON_THROW_ON_ERROR | JSON_UNESCAPED_UNICODE,
+        );
+
+        Http::fake([
+            'generativelanguage.googleapis.com/*' => Http::response($response, 200),
+        ]);
+
+        $this->postJson('/api/ingredient-analyses', [
+            'label_text' => 'HALAL. Состав: эмульгатор.',
+            'ingredients_text' => 'эмульгатор',
+            'source_quality' => 'complete',
+        ])
+            ->assertOk()
+            ->assertJsonPath('data.screening.status', 'needs_review')
+            ->assertJsonPath('data.screening.reason_codes.0', 'certificate_issuer_unverified')
+            ->assertJsonPath('data.screening.reason_codes.1', 'ingredient_origin_unverified');
+    }
+
     public function test_it_validates_the_optional_source_quality(): void
     {
         Http::fake();
@@ -345,6 +977,12 @@ class IngredientAnalysisApiTest extends TestCase
                                 'evidence_basis' => 'ingredients_text',
                                 'reason' => 'Animal source is not declared.',
                             ]],
+                            'halal_certification' => [
+                                'detected' => false,
+                                'certification_body' => '',
+                                'source_text' => '',
+                                'evidence_basis' => 'unknown',
+                            ],
                             'summary' => 'Gelatin origin requires verification.',
                         ], JSON_THROW_ON_ERROR),
                     ]],
